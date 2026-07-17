@@ -5,7 +5,7 @@ APP_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 CONFIG_FILE=${CALL_ADVISOR_CONFIG:-"$APP_DIR/call-advisor.conf"}
 
 WATCH_DIR=${WATCH_DIR:-/storage/emulated/0/Recordings/Call}
-OUTPUT_DIR=${OUTPUT_DIR:-/storage/emulated/0/CallAnalysis}
+OUTPUT_DIR=${OUTPUT_DIR:-/storage/emulated/0/Recordings/CallAnalysis}
 STATE_DIR=${STATE_DIR:-"$APP_DIR/.state"}
 WHISPER_DIR=${WHISPER_DIR:-"$APP_DIR/tools/whisper.cpp"}
 WHISPER_BIN=${WHISPER_BIN:-"$WHISPER_DIR/build/bin/whisper-cli"}

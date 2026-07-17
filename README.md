@@ -29,8 +29,8 @@ cp call-advisor.conf.example call-advisor.conf
 ```
 
 기본 감시 경로는 Samsung 계열 기기에서 사용하는
-`/storage/emulated/0/Recordings/Call`입니다. 결과는
-`/storage/emulated/0/CallAnalysis`에 저장됩니다.
+`/storage/emulated/0/Recordings/Call`입니다. 결과는 파일 앱에서 쉽게 찾도록 같은
+`Recordings` 아래의 `/storage/emulated/0/Recordings/CallAnalysis`에 저장됩니다.
 
 `base` 모델로 먼저 시험한 뒤 한국어 고유명사 정확도가 부족하면
 `./setup-whisper.sh small`을 실행하고 설정의 모델 경로를 `ggml-small.bin`으로

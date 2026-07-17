@@ -1,5 +1,5 @@
 WATCH_DIR='/storage/emulated/0/Recordings/Call'
-OUTPUT_DIR='/storage/emulated/0/CallAnalysis'
+OUTPUT_DIR='/storage/emulated/0/Recordings/CallAnalysis'
 
 WATCH_MODE=auto
 POLL_SECONDS=300
