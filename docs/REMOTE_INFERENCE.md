@@ -7,7 +7,7 @@ PC가 `whisper.cpp` 추론을 담당합니다. 외부 음성 API는 사용하지
 실패하면 선택적으로 스마트폰의 `base` 모델로 복귀합니다.
 
 ```text
-Android 녹음 → WAV 변환·VAD 측정 → SSH/SCP → PC small Whisper
+Android 녹음 → WAV 변환·VAD 측정 → SSH/SCP → PC medium Q5_0
                                               ↓
                   Markdown·CSV ← 전사문·성능 ←┘
 ```
@@ -24,14 +24,34 @@ Android 녹음 → WAV 변환·VAD 측정 → SSH/SCP → PC small Whisper
 저장합니다. SSH 공개키 인증과 `BatchMode`를 사용하므로 비밀번호를 스크립트나 로그에
 기록하지 않습니다.
 
+## Medium Q5_0 준비
+
+PC의 `whisper.cpp` 디렉터리에서 비양자화 medium을 받은 뒤 Q5_0으로 변환합니다.
+
+```sh
+./models/download-ggml-model.sh medium
+./build/bin/whisper-quantize \
+  models/ggml-medium.bin \
+  models/ggml-medium-q5_0.bin \
+  q5_0
+```
+
+변환이 끝나고 Q5_0 모델의 실행을 확인한 뒤 원본 medium 파일을 보관할지 결정합니다.
+정확도 회귀를 다시 비교할 수 있도록 충분한 저장공간이 있으면 원본 보관을 권장합니다.
+
 ## 실측
 
-Ryzen 5 5600X 6코어, WSL2, CPU-only `small`, 6스레드와 Tailscale SSH를 사용했습니다.
+Ryzen 5 5600X 6코어, WSL2, CPU-only, 6스레드와 Tailscale SSH를 사용했습니다.
 
 | 입력 | 오디오 | PC Whisper | 왕복 전송 | 전체 처리 |
 |---|---:|---:|---:|---:|
 | 실제 한국어 통화 | 18.09초 | 6.51초 | 1.442초 | 10.318초 |
 | 한국어 시험 녹음 | 35.92초 | 5.39초 | 약 1.6초 | 약 8.5초 |
+
+위 표는 `v0.2.0`의 PC `small` 기준입니다. `v0.3.0` 기본 모델인 medium Q5_0은
+18.09초 실제 통화를 19.64초, 35.92초 시험 녹음을 18.48초에 처리했고 최대 RSS는
+약 1.1GB였습니다. 비양자화 medium 대비 처리시간은 48%, RSS는 46% 감소했으며
+해당 두 샘플의 전사문은 사실상 동일했습니다.
 
 전체 처리에는 스마트폰 FFmpeg 변환, VAD 측정, 전송, PC 추론 및 로컬 결과 저장이
 포함됩니다. Codex가 비활성화된 시험이므로 선택적 텍스트 분석 시간은 제외했습니다.
