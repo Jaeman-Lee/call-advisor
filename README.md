@@ -32,6 +32,18 @@ cp call-advisor.conf.example call-advisor.conf
 `/storage/emulated/0/Recordings/Call`입니다. 결과는 파일 앱에서 쉽게 찾도록 같은
 `Recordings` 아래의 `/storage/emulated/0/Recordings/CallAnalysis`에 저장됩니다.
 
+## Obsidian 연동
+
+Obsidian Android는 임의의 Markdown 파일을 연결 앱으로 열지 않을 수 있습니다.
+설정에 Vault 경로와 이름을 지정하면 결과를 Vault에도 복사하고, 완료 알림은
+`obsidian://` 링크로 노트를 직접 엽니다.
+
+```sh
+OBSIDIAN_VAULT_DIR='/storage/emulated/0/Obsidians/MyVault'
+OBSIDIAN_VAULT_NAME='MyVault'
+OBSIDIAN_FOLDER='CallAnalysis'
+```
+
 `base` 모델로 먼저 시험한 뒤 한국어 고유명사 정확도가 부족하면
 `./setup-whisper.sh small`을 실행하고 설정의 모델 경로를 `ggml-small.bin`으로
 바꿀 수 있습니다. `small`은 다운로드와 전사 시간, 저장공간 사용량이 더 큽니다.

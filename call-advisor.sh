@@ -6,6 +6,9 @@ CONFIG_FILE=${CALL_ADVISOR_CONFIG:-"$APP_DIR/call-advisor.conf"}
 
 WATCH_DIR=${WATCH_DIR:-/storage/emulated/0/Recordings/Call}
 OUTPUT_DIR=${OUTPUT_DIR:-/storage/emulated/0/Recordings/CallAnalysis}
+OBSIDIAN_VAULT_DIR=${OBSIDIAN_VAULT_DIR:-}
+OBSIDIAN_VAULT_NAME=${OBSIDIAN_VAULT_NAME:-}
+OBSIDIAN_FOLDER=${OBSIDIAN_FOLDER:-CallAnalysis}
 STATE_DIR=${STATE_DIR:-"$APP_DIR/.state"}
 WHISPER_DIR=${WHISPER_DIR:-"$APP_DIR/tools/whisper.cpp"}
 WHISPER_BIN=${WHISPER_BIN:-"$WHISPER_DIR/build/bin/whisper-cli"}
@@ -47,10 +50,17 @@ notify() {
 notify_result() {
     result=$1
     summary=$2
+    obsidian_file=${3:-}
     [ "$NOTIFY" = true ] || return 0
     command -v termux-notification >/dev/null 2>&1 || return 0
-    escaped=$(printf '%s' "$result" | sed "s/'/'\\\\''/g")
-    action="termux-open '$escaped'"
+    if [ -n "$obsidian_file" ] && [ -n "$OBSIDIAN_VAULT_NAME" ] && command -v termux-open-url >/dev/null 2>&1; then
+        encoded_vault=$(python -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1]))' "$OBSIDIAN_VAULT_NAME")
+        encoded_file=$(python -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1]))' "$obsidian_file")
+        action="termux-open-url 'obsidian://open?vault=$encoded_vault&file=$encoded_file'"
+    else
+        escaped=$(printf '%s' "$result" | sed "s/'/'\\\\''/g")
+        action="termux-open '$escaped'"
+    fi
     termux-notification --id call-advisor --title "통화 분석 완료" \
         --content "$summary" --priority high --action "$action" \
         --button1 "결과 열기" --button1-action "$action" >/dev/null 2>&1 || true
@@ -146,9 +156,17 @@ analyze() {
     } > "$result"
 
     summary=$(tr '\n' ' ' < "$codex_result" | cut -c 1-300)
+    obsidian_file=
+    if [ -n "$OBSIDIAN_VAULT_DIR" ]; then
+        obsidian_dir="$OBSIDIAN_VAULT_DIR/$OBSIDIAN_FOLDER"
+        mkdir -p "$obsidian_dir"
+        cp "$result" "$obsidian_dir/${result##*/}"
+        obsidian_file="$OBSIDIAN_FOLDER/${result##*/}"
+        log "Copied to Obsidian: $obsidian_file"
+    fi
     mark_done "$fp"
     log "Saved: $result"
-    notify_result "$result" "$summary"
+    notify_result "$result" "$summary" "$obsidian_file"
 }
 
 scan_once() {

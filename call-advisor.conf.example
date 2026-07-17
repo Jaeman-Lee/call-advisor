@@ -1,6 +1,11 @@
 WATCH_DIR='/storage/emulated/0/Recordings/Call'
 OUTPUT_DIR='/storage/emulated/0/Recordings/CallAnalysis'
 
+# Optional: copy results into an Obsidian vault and open notifications there.
+OBSIDIAN_VAULT_DIR=
+OBSIDIAN_VAULT_NAME=
+OBSIDIAN_FOLDER='CallAnalysis'
+
 WATCH_MODE=auto
 POLL_SECONDS=300
 STABLE_SECONDS=3
