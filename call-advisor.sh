@@ -20,6 +20,17 @@ VAD_THRESHOLD=${VAD_THRESHOLD:-0.50}
 VAD_TRANSCRIBE_MAX_DENSITY=${VAD_TRANSCRIBE_MAX_DENSITY:-80}
 LANGUAGE=${LANGUAGE:-ko}
 THREADS=${THREADS:-6}
+TRANSCRIBE_BACKEND=${TRANSCRIBE_BACKEND:-local}
+LOCAL_FALLBACK=${LOCAL_FALLBACK:-true}
+REMOTE_SSH_HOST=${REMOTE_SSH_HOST:-}
+REMOTE_SSH_PORT=${REMOTE_SSH_PORT:-22}
+REMOTE_SSH_KEY=${REMOTE_SSH_KEY:-}
+REMOTE_DIR=${REMOTE_DIR:-whisper-server}
+REMOTE_MODEL=${REMOTE_MODEL:-models/ggml-small.bin}
+REMOTE_VAD_MODEL=${REMOTE_VAD_MODEL:-models/ggml-silero-v6.2.0.bin}
+REMOTE_THREADS=${REMOTE_THREADS:-6}
+REMOTE_CONNECT_TIMEOUT=${REMOTE_CONNECT_TIMEOUT:-8}
+REMOTE_CONTROL_PATH=${REMOTE_CONTROL_PATH:-/data/data/com.termux/files/usr/tmp/ca-%C}
 STABLE_SECONDS=${STABLE_SECONDS:-3}
 POLL_SECONDS=${POLL_SECONDS:-300}
 WATCH_MODE=${WATCH_MODE:-auto}
@@ -36,6 +47,39 @@ if [ -f "$CONFIG_FILE" ]; then
 fi
 
 log() { printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"; }
+
+remote_ssh() {
+    if [ -n "$REMOTE_SSH_KEY" ]; then
+        ssh -p "$REMOTE_SSH_PORT" -i "$REMOTE_SSH_KEY" -o IdentitiesOnly=yes \
+            -o BatchMode=yes -o ConnectTimeout="$REMOTE_CONNECT_TIMEOUT" \
+            -o ControlMaster=auto -o ControlPersist=60 \
+            -o ControlPath="$REMOTE_CONTROL_PATH" "$REMOTE_SSH_HOST" "$@"
+    else
+        ssh -p "$REMOTE_SSH_PORT" -o BatchMode=yes \
+            -o ConnectTimeout="$REMOTE_CONNECT_TIMEOUT" \
+            -o ControlMaster=auto -o ControlPersist=60 \
+            -o ControlPath="$REMOTE_CONTROL_PATH" "$REMOTE_SSH_HOST" "$@"
+    fi
+}
+
+remote_scp() {
+    if [ -n "$REMOTE_SSH_KEY" ]; then
+        scp -q -P "$REMOTE_SSH_PORT" -i "$REMOTE_SSH_KEY" -o IdentitiesOnly=yes \
+            -o BatchMode=yes -o ConnectTimeout="$REMOTE_CONNECT_TIMEOUT" \
+            -o ControlMaster=auto -o ControlPersist=60 \
+            -o ControlPath="$REMOTE_CONTROL_PATH" "$@"
+    else
+        scp -q -P "$REMOTE_SSH_PORT" -o BatchMode=yes \
+            -o ConnectTimeout="$REMOTE_CONNECT_TIMEOUT" \
+            -o ControlMaster=auto -o ControlPersist=60 \
+            -o ControlPath="$REMOTE_CONTROL_PATH" "$@"
+    fi
+}
+
+remote_ready() {
+    [ -n "$REMOTE_SSH_HOST" ] || return 1
+    remote_ssh "test -x '$REMOTE_DIR/build/bin/whisper-cli' && test -f '$REMOTE_DIR/$REMOTE_MODEL' && test -f '$REMOTE_DIR/$REMOTE_VAD_MODEL'"
+}
 
 usage() {
     cat <<'EOF'
@@ -127,10 +171,11 @@ analyze() {
     whisper_metrics="$work/whisper.metrics"
     vad_metrics="$work/vad.metrics"
     vad_segments_file="$work/vad-segments.txt"
+    transfer_metrics="$work/transfer.metrics"
 
     mkdir -p "$work"
     rm -f "$wav" "$transcript" "$codex_result" "$whisper_metrics" \
-        "$vad_metrics" "$vad_segments_file"
+        "$vad_metrics" "$vad_segments_file" "$transfer_metrics"
     log "Transcribing: $audio"
     notify "통화 전사 시작" "${audio##*/}"
 
@@ -175,12 +220,65 @@ analyze() {
         fi
     fi
 
-    if ! /data/data/com.termux/files/usr/bin/time -o "$whisper_metrics" \
-        -f 'user_seconds=%U\nsystem_seconds=%S\ncpu_percent=%P\nmax_rss_kb=%M\nelapsed_seconds=%e' \
-        env -u LD_LIBRARY_PATH "$WHISPER_BIN" -m "$WHISPER_MODEL" -f "$wav" -l "$LANGUAGE" \
-        -t "$THREADS" -otxt -of "$prefix" -np $vad_args; then
-        log "Transcription failed: $audio"
-        return 1
+    backend_used=local
+    transfer_seconds=0
+    remote_attempted=false
+    remote_succeeded=false
+    case "$TRANSCRIBE_BACKEND" in
+        auto|remote)
+            remote_attempted=true
+            if remote_ready; then
+                job="call-advisor-${stamp}-$$"
+                remote_wav="$REMOTE_DIR/incoming/$job.wav"
+                remote_prefix="$REMOTE_DIR/results/$job"
+                log "Using remote Whisper: $REMOTE_SSH_HOST ($REMOTE_MODEL)"
+                remote_vad_args=
+                if [ "$vad_applied" = true ]; then
+                    remote_vad_args="--vad -vm '$REMOTE_VAD_MODEL' -vt '$VAD_THRESHOLD'"
+                fi
+                upload_start=$(date +%s%3N)
+                if remote_scp "$wav" "$REMOTE_SSH_HOST:$remote_wav" && \
+                   upload_end=$(date +%s%3N) && \
+                   remote_ssh "cd '$REMOTE_DIR' && /usr/bin/time -o 'results/$job.metrics' -f 'user_seconds=%U\\nsystem_seconds=%S\\ncpu_percent=%P\\nmax_rss_kb=%M\\nelapsed_seconds=%e' ./build/bin/whisper-cli -m '$REMOTE_MODEL' -f 'incoming/$job.wav' -l '$LANGUAGE' -t '$REMOTE_THREADS' -otxt -of 'results/$job' -np $remote_vad_args" && \
+                   download_start=$(date +%s%3N) && \
+                   remote_scp "$REMOTE_SSH_HOST:$remote_prefix.txt" "$transcript" && \
+                   remote_scp "$REMOTE_SSH_HOST:$remote_prefix.metrics" "$whisper_metrics" && \
+                   download_end=$(date +%s%3N); then
+                    backend_used=remote
+                    remote_succeeded=true
+                    transfer_seconds=$(awk -v us="$upload_start" -v ue="$upload_end" \
+                        -v ds="$download_start" -v de="$download_end" \
+                        'BEGIN {printf "%.3f", ((ue-us)+(de-ds))/1000}')
+                fi
+                remote_ssh "rm -f '$remote_wav' '$remote_prefix.txt' '$remote_prefix.metrics'" >/dev/null 2>&1 || true
+            fi
+            ;;
+        local) ;;
+        *) log "Invalid TRANSCRIBE_BACKEND: $TRANSCRIBE_BACKEND"; return 1 ;;
+    esac
+
+    if [ "$remote_succeeded" != true ]; then
+        if [ "$remote_attempted" = true ]; then
+            if [ "$LOCAL_FALLBACK" != true ]; then
+                log "Remote transcription unavailable and local fallback disabled"
+                return 1
+            fi
+            log "Remote transcription unavailable; using local fallback"
+        fi
+        if ! /data/data/com.termux/files/usr/bin/time -o "$whisper_metrics" \
+            -f 'user_seconds=%U\nsystem_seconds=%S\ncpu_percent=%P\nmax_rss_kb=%M\nelapsed_seconds=%e' \
+            env -u LD_LIBRARY_PATH "$WHISPER_BIN" -m "$WHISPER_MODEL" -f "$wav" -l "$LANGUAGE" \
+            -t "$THREADS" -otxt -of "$prefix" -np $vad_args; then
+            log "Transcription failed: $audio"
+            return 1
+        fi
+    fi
+    if [ "$backend_used" = remote ]; then
+        threads_used=$REMOTE_THREADS
+        model_used=$REMOTE_MODEL
+    else
+        threads_used=$THREADS
+        model_used=$WHISPER_MODEL
     fi
 
     codex_start=$(date +%s%3N)
@@ -219,10 +317,10 @@ analyze() {
 
     cp "$transcript" "$transcript_result"
     {
-        printf 'audio_seconds,speech_seconds,silence_seconds,speech_density_percent,vad_applied,vad_seconds,threads,whisper_wall_seconds,whisper_cpu_seconds,average_cores,max_rss_mb,transcript_chars,codex_enabled,codex_seconds,total_seconds\n'
-        printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
+        printf 'audio_seconds,speech_seconds,silence_seconds,speech_density_percent,vad_applied,vad_seconds,backend,transfer_seconds,threads,whisper_wall_seconds,whisper_cpu_seconds,average_cores,max_rss_mb,transcript_chars,codex_enabled,codex_seconds,total_seconds\n'
+        printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
             "$audio_duration" "$speech_seconds" "$silence_seconds" "$speech_density" \
-            "$vad_applied" "$vad_seconds" "$THREADS" "$whisper_seconds" "$core_seconds" \
+            "$vad_applied" "$vad_seconds" "$backend_used" "$transfer_seconds" "$threads_used" "$whisper_seconds" "$core_seconds" \
             "$average_cores" "$max_rss_mb" "$transcript_chars" "$CODEX_ENABLED" \
             "$codex_seconds" "$total_seconds"
     } > "$metrics_result"
@@ -232,6 +330,8 @@ analyze() {
         printf -- '- 원본: `%s`\n' "$audio"
         printf -- '- 분석 시각: %s\n' "$(date '+%Y-%m-%d %H:%M:%S %Z')"
         printf -- '- 전사 언어: `%s`\n' "$LANGUAGE"
+        printf -- '- 전사 백엔드: `%s`\n' "$backend_used"
+        printf -- '- Whisper 모델: `%s`\n' "$model_used"
         printf -- '- reasoning effort: `%s`\n\n' "$EFFORT"
         printf -- '- Codex 분석 활성화: `%s`\n\n' "$CODEX_ENABLED"
         printf '## 실행 성능\n\n'
@@ -243,6 +343,7 @@ analyze() {
         printf '| 발화 밀도 | %s%% |\n' "$speech_density"
         printf '| Whisper VAD 압축 적용 | %s (기준 ≤ %s%%) |\n' "$vad_applied" "$VAD_TRANSCRIBE_MAX_DENSITY"
         printf '| FFmpeg 변환 | %s초 |\n' "$convert_seconds"
+        printf '| PC 왕복 전송 | %s초 |\n' "$transfer_seconds"
         printf '| Whisper wall time | %s초 |\n' "$whisper_seconds"
         printf '| 재생시간 대비 전사 속도 | %s배속 |\n' "$audio_per_wall"
         printf '| Whisper 평균 사용 코어 | %s개 |\n' "$average_cores"
@@ -308,13 +409,31 @@ initialize() {
 
 check_setup() {
     failed=false
-    for path in "$WATCH_DIR" "$WHISPER_BIN" "$WHISPER_MODEL"; do
+    for path in "$WATCH_DIR"; do
         if [ -e "$path" ]; then log "OK: $path"; else log "ERROR: missing $path"; failed=true; fi
     done
-    if [ "$VAD_ENABLED" = true ]; then
-        for path in "$VAD_BIN" "$VAD_MODEL"; do
+    if [ "$TRANSCRIBE_BACKEND" = local ] || [ "$LOCAL_FALLBACK" = true ]; then
+        for path in "$WHISPER_BIN" "$WHISPER_MODEL"; do
             if [ -e "$path" ]; then log "OK: $path"; else log "ERROR: missing $path"; failed=true; fi
         done
+        if [ "$VAD_ENABLED" = true ]; then
+            for path in "$VAD_BIN" "$VAD_MODEL"; do
+                if [ -e "$path" ]; then log "OK: $path"; else log "ERROR: missing $path"; failed=true; fi
+            done
+        fi
+    fi
+    if [ "$TRANSCRIBE_BACKEND" = auto ] || [ "$TRANSCRIBE_BACKEND" = remote ]; then
+        for command in ssh scp; do
+            command -v "$command" >/dev/null 2>&1 && log "OK: $command" || { log "ERROR: missing $command"; failed=true; }
+        done
+        if remote_ready; then
+            log "OK: remote Whisper $REMOTE_SSH_HOST ($REMOTE_MODEL)"
+        elif [ "$LOCAL_FALLBACK" = true ]; then
+            log "INFO: remote Whisper unavailable; local fallback will be used"
+        else
+            log "ERROR: remote Whisper unavailable and local fallback disabled"
+            failed=true
+        fi
     fi
     for command in ffmpeg ffprobe /data/data/com.termux/files/usr/bin/time; do
         if command -v "$command" >/dev/null 2>&1; then log "OK: $command"; else log "ERROR: missing $command"; failed=true; fi

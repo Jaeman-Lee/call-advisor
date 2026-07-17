@@ -17,6 +17,20 @@ EFFORT=low
 CODEX_ENABLED=true
 NOTIFY=true
 
+# local: phone only, remote: PC only (unless fallback), auto: prefer PC.
+TRANSCRIBE_BACKEND=local
+LOCAL_FALLBACK=true
+
+# Keep real host names, addresses and key paths only in call-advisor.conf.
+REMOTE_SSH_HOST='user@pc-tailscale-name'
+REMOTE_SSH_PORT=22
+REMOTE_SSH_KEY="$HOME/.ssh/id_ed25519"
+REMOTE_DIR='whisper-server'
+REMOTE_MODEL='models/ggml-small.bin'
+REMOTE_VAD_MODEL='models/ggml-silero-v6.2.0.bin'
+REMOTE_THREADS=6
+REMOTE_CONNECT_TIMEOUT=8
+
 # Change base to small in both paths after downloading the small model.
 WHISPER_DIR="$APP_DIR/tools/whisper.cpp"
 WHISPER_BIN="$WHISPER_DIR/build/bin/whisper-cli"
