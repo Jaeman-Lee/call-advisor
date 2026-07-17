@@ -115,13 +115,20 @@ analyze() {
     prefix="$work/transcript"
     transcript="$prefix.txt"
     result="$OUTPUT_DIR/${stem}-${stamp}.md"
+    transcript_result="$OUTPUT_DIR/${stem}-${stamp}.transcript.txt"
     codex_result="$work/analysis.txt"
+    whisper_metrics="$work/whisper.metrics"
 
     mkdir -p "$work"
-    rm -f "$wav" "$transcript" "$codex_result"
+    rm -f "$wav" "$transcript" "$codex_result" "$whisper_metrics"
     log "Transcribing: $audio"
     notify "통화 전사 시작" "${audio##*/}"
 
+    total_start=$(date +%s%3N)
+    audio_duration=$(env -u LD_LIBRARY_PATH ffprobe -v error \
+        -show_entries format=duration -of default=nokey=1:noprint_wrappers=1 "$audio" 2>/dev/null || printf 0)
+
+    convert_start=$(date +%s%3N)
     # The Android Codex wrapper may export a bundled LD_LIBRARY_PATH that is
     # incompatible with Termux multimedia libraries. Use Termux's own loader.
     if ! env -u LD_LIBRARY_PATH ffmpeg -nostdin -v error -y -i "$audio" \
@@ -129,19 +136,42 @@ analyze() {
         log "Audio conversion failed: $audio"
         return 1
     fi
+    convert_end=$(date +%s%3N)
 
-    if ! env -u LD_LIBRARY_PATH "$WHISPER_BIN" -m "$WHISPER_MODEL" -f "$wav" -l "$LANGUAGE" \
+    if ! /data/data/com.termux/files/usr/bin/time -o "$whisper_metrics" \
+        -f 'user_seconds=%U\nsystem_seconds=%S\ncpu_percent=%P\nmax_rss_kb=%M\nelapsed_seconds=%e' \
+        env -u LD_LIBRARY_PATH "$WHISPER_BIN" -m "$WHISPER_MODEL" -f "$wav" -l "$LANGUAGE" \
         -t "$THREADS" -otxt -of "$prefix" -np; then
         log "Transcription failed: $audio"
         return 1
     fi
 
     log "Analyzing transcript with Codex"
+    codex_start=$(date +%s%3N)
     if ! codex exec --ephemeral -c "model_reasoning_effort=\"$EFFORT\"" \
         --output-last-message "$codex_result" "$PROMPT" < "$transcript"; then
         log "Codex analysis failed: $audio"
         return 1
     fi
+    codex_end=$(date +%s%3N)
+    total_end=$(date +%s%3N)
+
+    user_seconds=$(sed -n 's/^user_seconds=//p' "$whisper_metrics")
+    system_seconds=$(sed -n 's/^system_seconds=//p' "$whisper_metrics")
+    cpu_percent=$(sed -n 's/^cpu_percent=//p' "$whisper_metrics" | tr -d '%')
+    max_rss_kb=$(sed -n 's/^max_rss_kb=//p' "$whisper_metrics")
+    whisper_seconds=$(sed -n 's/^elapsed_seconds=//p' "$whisper_metrics")
+    convert_seconds=$(awk -v a="$convert_start" -v b="$convert_end" 'BEGIN {printf "%.3f", (b-a)/1000}')
+    codex_seconds=$(awk -v a="$codex_start" -v b="$codex_end" 'BEGIN {printf "%.3f", (b-a)/1000}')
+    total_seconds=$(awk -v a="$total_start" -v b="$total_end" 'BEGIN {printf "%.3f", (b-a)/1000}')
+    average_cores=$(awk -v p="$cpu_percent" 'BEGIN {printf "%.2f", p/100}')
+    realtime_factor=$(awk -v w="$whisper_seconds" -v a="$audio_duration" 'BEGIN {if (a>0) printf "%.2f", w/a; else print "n/a"}')
+    audio_per_wall=$(awk -v w="$whisper_seconds" -v a="$audio_duration" 'BEGIN {if (w>0) printf "%.2f", a/w; else print "n/a"}')
+    core_seconds=$(awk -v u="$user_seconds" -v s="$system_seconds" 'BEGIN {printf "%.2f", u+s}')
+    core_seconds_per_audio_min=$(awk -v u="$user_seconds" -v s="$system_seconds" -v a="$audio_duration" 'BEGIN {if (a>0) printf "%.2f", (u+s)*60/a; else print "n/a"}')
+    max_rss_mb=$(awk -v k="$max_rss_kb" 'BEGIN {printf "%.1f", k/1024}')
+
+    cp "$transcript" "$transcript_result"
 
     {
         printf '# 통화 분석\n\n'
@@ -149,8 +179,22 @@ analyze() {
         printf -- '- 분석 시각: %s\n' "$(date '+%Y-%m-%d %H:%M:%S %Z')"
         printf -- '- 전사 언어: `%s`\n' "$LANGUAGE"
         printf -- '- reasoning effort: `%s`\n\n' "$EFFORT"
+        printf '## 실행 성능\n\n'
+        printf '| 지표 | 값 |\n|---|---:|\n'
+        printf '| 오디오 길이 | %.2f초 |\n' "$audio_duration"
+        printf '| FFmpeg 변환 | %s초 |\n' "$convert_seconds"
+        printf '| Whisper wall time | %s초 |\n' "$whisper_seconds"
+        printf '| Whisper 실시간 배율 | %sx |\n' "$realtime_factor"
+        printf '| Whisper 처리율 | %sx realtime |\n' "$audio_per_wall"
+        printf '| Whisper 평균 사용 코어 | %s개 |\n' "$average_cores"
+        printf '| Whisper CPU 총시간 | %s core-seconds |\n' "$core_seconds"
+        printf '| 오디오 1분당 CPU | %s core-seconds |\n' "$core_seconds_per_audio_min"
+        printf '| Whisper 최대 RSS | %sMB |\n' "$max_rss_mb"
+        printf '| Codex 분석 | %s초 |\n' "$codex_seconds"
+        printf '| 전체 처리 | %s초 |\n\n' "$total_seconds"
+        printf '## Codex 분석 결과\n\n'
         cat "$codex_result"
-        printf '\n\n## 자동 전사문\n\n'
+        printf '\n\n## 통화 전사 원문\n\n'
         cat "$transcript"
         printf '\n'
     } > "$result"
@@ -161,6 +205,7 @@ analyze() {
         obsidian_dir="$OBSIDIAN_VAULT_DIR/$OBSIDIAN_FOLDER"
         mkdir -p "$obsidian_dir"
         cp "$result" "$obsidian_dir/${result##*/}"
+        cp "$transcript_result" "$obsidian_dir/${transcript_result##*/}"
         obsidian_file="$OBSIDIAN_FOLDER/${result##*/}"
         log "Copied to Obsidian: $obsidian_file"
     fi
