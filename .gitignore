@@ -1,0 +1,6 @@
+.state/
+tools/
+call-advisor.conf
+call-advisor.log
+nohup.out
+.setup-whisper.log
