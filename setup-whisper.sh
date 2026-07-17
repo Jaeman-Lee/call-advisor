@@ -22,5 +22,6 @@ fi
 cmake -S "$WHISPER_DIR" -B "$WHISPER_DIR/build" -DCMAKE_BUILD_TYPE=Release
 cmake --build "$WHISPER_DIR/build" --config Release -j 4
 "$WHISPER_DIR/models/download-ggml-model.sh" "$MODEL"
+"$WHISPER_DIR/models/download-vad-model.sh" silero-v6.2.0
 
 printf 'Whisper is ready. Model: %s\n' "$MODEL"

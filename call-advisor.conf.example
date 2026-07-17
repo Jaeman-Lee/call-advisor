@@ -14,11 +14,17 @@ SCAN_EXISTING=false
 LANGUAGE=ko
 THREADS=6
 EFFORT=low
+CODEX_ENABLED=true
 NOTIFY=true
 
 # Change base to small in both paths after downloading the small model.
 WHISPER_DIR="$APP_DIR/tools/whisper.cpp"
 WHISPER_BIN="$WHISPER_DIR/build/bin/whisper-cli"
 WHISPER_MODEL="$WHISPER_DIR/models/ggml-base.bin"
+VAD_ENABLED=true
+VAD_BIN="$WHISPER_DIR/build/bin/whisper-vad-speech-segments"
+VAD_MODEL="$WHISPER_DIR/models/ggml-silero-v6.2.0.bin"
+VAD_THRESHOLD=0.50
+VAD_TRANSCRIBE_MAX_DENSITY=80
 
 PROMPT='다음은 전화 통화의 자동 전사문입니다. 한국어로 핵심 요약, 합의된 내용, 해야 할 일과 담당자, 일정이나 날짜, 다시 확인할 사항을 구분하세요. 전사 오류 가능성이 있는 고유명사와 숫자는 불확실하다고 표시하세요. 추측으로 내용을 만들지 마세요.'

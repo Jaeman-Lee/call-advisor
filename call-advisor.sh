@@ -13,12 +13,18 @@ STATE_DIR=${STATE_DIR:-"$APP_DIR/.state"}
 WHISPER_DIR=${WHISPER_DIR:-"$APP_DIR/tools/whisper.cpp"}
 WHISPER_BIN=${WHISPER_BIN:-"$WHISPER_DIR/build/bin/whisper-cli"}
 WHISPER_MODEL=${WHISPER_MODEL:-"$WHISPER_DIR/models/ggml-base.bin"}
+VAD_ENABLED=${VAD_ENABLED:-true}
+VAD_BIN=${VAD_BIN:-"$WHISPER_DIR/build/bin/whisper-vad-speech-segments"}
+VAD_MODEL=${VAD_MODEL:-"$WHISPER_DIR/models/ggml-silero-v6.2.0.bin"}
+VAD_THRESHOLD=${VAD_THRESHOLD:-0.50}
+VAD_TRANSCRIBE_MAX_DENSITY=${VAD_TRANSCRIBE_MAX_DENSITY:-80}
 LANGUAGE=${LANGUAGE:-ko}
 THREADS=${THREADS:-6}
 STABLE_SECONDS=${STABLE_SECONDS:-3}
 POLL_SECONDS=${POLL_SECONDS:-300}
 WATCH_MODE=${WATCH_MODE:-auto}
 EFFORT=${EFFORT:-low}
+CODEX_ENABLED=${CODEX_ENABLED:-true}
 NOTIFY=${NOTIFY:-true}
 SCAN_EXISTING=${SCAN_EXISTING:-false}
 PROMPT=${PROMPT:-다음은 전화 통화의 자동 전사문입니다. 한국어로 핵심 요약, 합의된 내용, 해야 할 일과 담당자, 일정이나 날짜, 다시 확인할 사항을 구분하세요. 전사 오류 가능성이 있는 고유명사와 숫자는 불확실하다고 표시하세요. 추측으로 내용을 만들지 마세요.}
@@ -116,11 +122,15 @@ analyze() {
     transcript="$prefix.txt"
     result="$OUTPUT_DIR/${stem}-${stamp}.md"
     transcript_result="$OUTPUT_DIR/${stem}-${stamp}.transcript.txt"
+    metrics_result="$OUTPUT_DIR/${stem}-${stamp}.metrics.csv"
     codex_result="$work/analysis.txt"
     whisper_metrics="$work/whisper.metrics"
+    vad_metrics="$work/vad.metrics"
+    vad_segments_file="$work/vad-segments.txt"
 
     mkdir -p "$work"
-    rm -f "$wav" "$transcript" "$codex_result" "$whisper_metrics"
+    rm -f "$wav" "$transcript" "$codex_result" "$whisper_metrics" \
+        "$vad_metrics" "$vad_segments_file"
     log "Transcribing: $audio"
     notify "통화 전사 시작" "${audio##*/}"
 
@@ -138,20 +148,52 @@ analyze() {
     fi
     convert_end=$(date +%s%3N)
 
+    speech_seconds=$audio_duration
+    silence_seconds=0
+    speech_density=100.0
+    vad_segments=0
+    vad_seconds=0
+    vad_applied=false
+    vad_args=
+    if [ "$VAD_ENABLED" = true ]; then
+        if ! /data/data/com.termux/files/usr/bin/time -o "$vad_metrics" \
+            -f 'elapsed_seconds=%e' env -u LD_LIBRARY_PATH "$VAD_BIN" \
+            --vad-model "$VAD_MODEL" --vad-threshold "$VAD_THRESHOLD" \
+            --file "$wav" --no-prints > "$vad_segments_file"; then
+            log "VAD measurement failed: $audio"
+            return 1
+        fi
+        vad_seconds=$(sed -n 's/^elapsed_seconds=//p' "$vad_metrics")
+        vad_segments=$(grep -c '^Speech segment ' "$vad_segments_file" || true)
+        # whisper.cpp exposes VAD segment timestamps in centiseconds.
+        speech_seconds=$(awk '/^Speech segment / {gsub(/,/, "", $6); sum += ($9-$6)/100} END {printf "%.3f", sum}' "$vad_segments_file")
+        silence_seconds=$(awk -v a="$audio_duration" -v s="$speech_seconds" 'BEGIN {v=a-s; if(v<0)v=0; printf "%.3f", v}')
+        speech_density=$(awk -v a="$audio_duration" -v s="$speech_seconds" 'BEGIN {if(a>0) printf "%.1f", s*100/a; else print 0}')
+        if awk -v d="$speech_density" -v limit="$VAD_TRANSCRIBE_MAX_DENSITY" 'BEGIN {exit !(d <= limit)}'; then
+            vad_args="--vad --vad-model $VAD_MODEL --vad-threshold $VAD_THRESHOLD"
+            vad_applied=true
+        fi
+    fi
+
     if ! /data/data/com.termux/files/usr/bin/time -o "$whisper_metrics" \
         -f 'user_seconds=%U\nsystem_seconds=%S\ncpu_percent=%P\nmax_rss_kb=%M\nelapsed_seconds=%e' \
         env -u LD_LIBRARY_PATH "$WHISPER_BIN" -m "$WHISPER_MODEL" -f "$wav" -l "$LANGUAGE" \
-        -t "$THREADS" -otxt -of "$prefix" -np; then
+        -t "$THREADS" -otxt -of "$prefix" -np $vad_args; then
         log "Transcription failed: $audio"
         return 1
     fi
 
-    log "Analyzing transcript with Codex"
     codex_start=$(date +%s%3N)
-    if ! codex exec --ephemeral -c "model_reasoning_effort=\"$EFFORT\"" \
-        --output-last-message "$codex_result" "$PROMPT" < "$transcript"; then
-        log "Codex analysis failed: $audio"
-        return 1
+    if [ "$CODEX_ENABLED" = true ]; then
+        log "Analyzing transcript with Codex"
+        if ! codex exec --ephemeral -c "model_reasoning_effort=\"$EFFORT\"" \
+            --output-last-message "$codex_result" "$PROMPT" < "$transcript"; then
+            log "Codex analysis failed: $audio"
+            return 1
+        fi
+    else
+        log "Codex disabled; keeping transcript fully local"
+        printf 'Codex 분석이 비활성화된 완전 로컬 전사 모드입니다.\n' > "$codex_result"
     fi
     codex_end=$(date +%s%3N)
     total_end=$(date +%s%3N)
@@ -170,8 +212,20 @@ analyze() {
     core_seconds=$(awk -v u="$user_seconds" -v s="$system_seconds" 'BEGIN {printf "%.2f", u+s}')
     core_seconds_per_audio_min=$(awk -v u="$user_seconds" -v s="$system_seconds" -v a="$audio_duration" 'BEGIN {if (a>0) printf "%.2f", (u+s)*60/a; else print "n/a"}')
     max_rss_mb=$(awk -v k="$max_rss_kb" 'BEGIN {printf "%.1f", k/1024}')
+    transcript_chars=$(wc -m < "$transcript" | tr -d ' ')
+    chars_per_speech_min=$(awk -v c="$transcript_chars" -v s="$speech_seconds" 'BEGIN {if(s>0) printf "%.1f", c*60/s; else print 0}')
+    wall_per_speech_min=$(awk -v w="$whisper_seconds" -v s="$speech_seconds" 'BEGIN {if(s>0) printf "%.2f", w*60/s; else print "n/a"}')
+    core_seconds_per_speech_min=$(awk -v u="$user_seconds" -v y="$system_seconds" -v s="$speech_seconds" 'BEGIN {if(s>0) printf "%.2f", (u+y)*60/s; else print "n/a"}')
 
     cp "$transcript" "$transcript_result"
+    {
+        printf 'audio_seconds,speech_seconds,silence_seconds,speech_density_percent,vad_applied,vad_seconds,threads,whisper_wall_seconds,whisper_cpu_seconds,average_cores,max_rss_mb,transcript_chars,codex_enabled,codex_seconds,total_seconds\n'
+        printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
+            "$audio_duration" "$speech_seconds" "$silence_seconds" "$speech_density" \
+            "$vad_applied" "$vad_seconds" "$THREADS" "$whisper_seconds" "$core_seconds" \
+            "$average_cores" "$max_rss_mb" "$transcript_chars" "$CODEX_ENABLED" \
+            "$codex_seconds" "$total_seconds"
+    } > "$metrics_result"
 
     {
         printf '# 통화 분석\n\n'
@@ -179,17 +233,26 @@ analyze() {
         printf -- '- 분석 시각: %s\n' "$(date '+%Y-%m-%d %H:%M:%S %Z')"
         printf -- '- 전사 언어: `%s`\n' "$LANGUAGE"
         printf -- '- reasoning effort: `%s`\n\n' "$EFFORT"
+        printf -- '- Codex 분석 활성화: `%s`\n\n' "$CODEX_ENABLED"
         printf '## 실행 성능\n\n'
         printf '| 지표 | 값 |\n|---|---:|\n'
         printf '| 오디오 길이 | %.2f초 |\n' "$audio_duration"
+        printf '| VAD 측정 | %s초 |\n' "$vad_seconds"
+        printf '| 발화 구간 | %s초 (%s개) |\n' "$speech_seconds" "$vad_segments"
+        printf '| 무음 구간 | %s초 |\n' "$silence_seconds"
+        printf '| 발화 밀도 | %s%% |\n' "$speech_density"
+        printf '| Whisper VAD 압축 적용 | %s (기준 ≤ %s%%) |\n' "$vad_applied" "$VAD_TRANSCRIBE_MAX_DENSITY"
         printf '| FFmpeg 변환 | %s초 |\n' "$convert_seconds"
         printf '| Whisper wall time | %s초 |\n' "$whisper_seconds"
-        printf '| Whisper 실시간 배율 | %sx |\n' "$realtime_factor"
-        printf '| Whisper 처리율 | %sx realtime |\n' "$audio_per_wall"
+        printf '| 재생시간 대비 전사 속도 | %s배속 |\n' "$audio_per_wall"
         printf '| Whisper 평균 사용 코어 | %s개 |\n' "$average_cores"
         printf '| Whisper CPU 총시간 | %s core-seconds |\n' "$core_seconds"
         printf '| 오디오 1분당 CPU | %s core-seconds |\n' "$core_seconds_per_audio_min"
+        printf '| 발화 1분당 wall time | %s초 |\n' "$wall_per_speech_min"
+        printf '| 발화 1분당 CPU | %s core-seconds |\n' "$core_seconds_per_speech_min"
         printf '| Whisper 최대 RSS | %sMB |\n' "$max_rss_mb"
+        printf '| 전사 문자 수 | %s자 |\n' "$transcript_chars"
+        printf '| 발화 1분당 문자 수 | %s자 |\n' "$chars_per_speech_min"
         printf '| Codex 분석 | %s초 |\n' "$codex_seconds"
         printf '| 전체 처리 | %s초 |\n\n' "$total_seconds"
         printf '## Codex 분석 결과\n\n'
@@ -206,6 +269,7 @@ analyze() {
         mkdir -p "$obsidian_dir"
         cp "$result" "$obsidian_dir/${result##*/}"
         cp "$transcript_result" "$obsidian_dir/${transcript_result##*/}"
+        cp "$metrics_result" "$obsidian_dir/${metrics_result##*/}"
         obsidian_file="$OBSIDIAN_FOLDER/${result##*/}"
         log "Copied to Obsidian: $obsidian_file"
     fi
@@ -247,9 +311,19 @@ check_setup() {
     for path in "$WATCH_DIR" "$WHISPER_BIN" "$WHISPER_MODEL"; do
         if [ -e "$path" ]; then log "OK: $path"; else log "ERROR: missing $path"; failed=true; fi
     done
-    for command in ffmpeg codex; do
+    if [ "$VAD_ENABLED" = true ]; then
+        for path in "$VAD_BIN" "$VAD_MODEL"; do
+            if [ -e "$path" ]; then log "OK: $path"; else log "ERROR: missing $path"; failed=true; fi
+        done
+    fi
+    for command in ffmpeg ffprobe /data/data/com.termux/files/usr/bin/time; do
         if command -v "$command" >/dev/null 2>&1; then log "OK: $command"; else log "ERROR: missing $command"; failed=true; fi
     done
+    if [ "$CODEX_ENABLED" = true ]; then
+        command -v codex >/dev/null 2>&1 && log "OK: codex" || { log "ERROR: missing codex"; failed=true; }
+    else
+        log "OK: fully local mode (Codex disabled)"
+    fi
     command -v inotifywait >/dev/null 2>&1 && log "OK: inotifywait" || log "INFO: polling fallback only"
     [ "$failed" = false ]
 }
