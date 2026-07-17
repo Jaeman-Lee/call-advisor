@@ -110,12 +110,15 @@ analyze() {
     log "Transcribing: $audio"
     notify "통화 전사 시작" "${audio##*/}"
 
-    if ! ffmpeg -nostdin -v error -y -i "$audio" -ar 16000 -ac 1 -c:a pcm_s16le "$wav"; then
+    # The Android Codex wrapper may export a bundled LD_LIBRARY_PATH that is
+    # incompatible with Termux multimedia libraries. Use Termux's own loader.
+    if ! env -u LD_LIBRARY_PATH ffmpeg -nostdin -v error -y -i "$audio" \
+        -ar 16000 -ac 1 -c:a pcm_s16le "$wav"; then
         log "Audio conversion failed: $audio"
         return 1
     fi
 
-    if ! "$WHISPER_BIN" -m "$WHISPER_MODEL" -f "$wav" -l "$LANGUAGE" \
+    if ! env -u LD_LIBRARY_PATH "$WHISPER_BIN" -m "$WHISPER_MODEL" -f "$wav" -l "$LANGUAGE" \
         -t "$THREADS" -otxt -of "$prefix" -np; then
         log "Transcription failed: $audio"
         return 1
