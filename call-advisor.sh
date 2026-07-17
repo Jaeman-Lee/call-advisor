@@ -87,7 +87,9 @@ is_stable() {
 safe_stem() {
     base=${1##*/}
     stem=${base%.*}
-    printf '%s' "$stem" | tr -c '[:alnum:]_.-' '_'
+    # Android recorder names commonly contain Korean and spaces. Preserve
+    # Unicode while replacing whitespace that is awkward in result paths.
+    printf '%s' "$stem" | sed 's/[[:space:]]/_/g'
 }
 
 analyze() {
