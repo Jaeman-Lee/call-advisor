@@ -1,0 +1,11 @@
+name: Git hygiene
+on:
+  pull_request:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  hygiene:
+    uses: Jaeman-Lee/dotfiles/.github/workflows/git-hygiene.yml@d8e2db63c3acd8507e3f330d983a2f219d4f5855
